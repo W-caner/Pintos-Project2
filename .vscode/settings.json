@@ -1,0 +1,17 @@
+{
+    "files.associations": {
+        "process.h": "c",
+        "interrupt.h": "c",
+        "inttypes.h": "c",
+        "debug.h": "c",
+        "*.inc": "c",
+        "main.h": "c",
+        "lib.h": "c",
+        "thread.h": "c",
+        "stdio.h": "c",
+        "syscall.h": "c",
+        "unistd.h": "c",
+        "cstdlib": "c",
+        "directory.h": "c"
+    }
+}
