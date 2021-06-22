@@ -1,0 +1,554 @@
+## 系统调用
+
+### 访问用户内存
+
+#### 实验目的
+
+作为系统调用的一部分，内核必须经常通过用户程序提供的指针访问内存。内核在这样做时必须非常小心，因为用户可以传递一个空指针、一个指向未映射虚拟内存的指针或一个指向内核虚拟地址空间的指针。通过终止违规进程并释放其资源，必须拒绝所有这些类型的无效指针，而不会对内核或其他正在运行的进程造成损害
+
+#### 实现方法
+
+文档中提供了两种实现的方法
+
+无论哪种情况，都需要确保不会“泄漏”资源。例如，假设系统调用使用`malloc()`. 如果之后遇到无效的用户指针，必须确保释放锁定或释放内存页面
+
++ 验证用户提供的指针的有效性，然后取消引用它。需要查看`userprog/pagedir.c`和`threads/vaddr.h`中的函数
+
++ 只检查用户指针是否指向下方的PHYS_BASE，然后取消引用它。无效的用户指针将导致“页面错误”，可以通过修改代码的处理`page_fault()`在`userprog/exception.c`。如果无效指针导致页面错误，则更难处理，因为无法从内存访问中返回错误代码。因此，对于那些想要尝试后一种技术的人，我们将提供一些有用的代码：
+
+  ```C
+  /* 在用户虚拟地址 UADDR 读取一个字节。
+     UADDR 必须低于 PHYS_BASE。
+     如果成功则返回字节值，如果出现段错误则返回 -1
+     发生。*/
+  static int
+  get_user (const uint8_t *uaddr)
+  {
+    int result;
+    asm ("movl $1f, %0; movzbl %1, %0; 1:"
+         ："=&a"(result) : "m"(*uaddr));
+    return result;
+  }
+   
+  /* 将 BYTE 写入用户地址 UDST。
+     UDST 必须低于 PHYS_BASE。
+     如果成功则返回真，如果发生段错误则返回假。*/
+  static bool
+  put_user (uint8_t *udst, uint8_t byte)
+  {
+    int error_code;
+    asm ("movl $1f, %0; movb %b2, %1; 1:"
+         : "=&a" (error_code), "=m" (*udst) : "q" (byte));
+    return error_code != -1;
+  }
+  ```
+
+#### 实现代码
+
+源代码使用第二种方法
+
+```c
+/* Method in document to handle special situation */
+static int
+get_user (const uint8_t *uaddr)
+{
+  int result;
+  asm ("movl $1f, %0; movzbl %1, %0; 1:"
+       : "=&a" (result) : "m" (*uaddr));
+  return result;
+}
+
+/* New method to check the address and pages to pass test sc-bad-boundary2, execute */
+void *
+check_ptr2(const void *vaddr)
+{
+    /* Judge address */
+    if (!is_user_vaddr(vaddr))
+    {
+        exit_special();
+    }
+    /* Judge the page */
+    void *ptr = pagedir_get_page(thread_current()->pagedir, vaddr);
+    if (!ptr)
+    {
+        exit_special();
+    }
+    /* Judge the content of page */
+    uint8_t *check_byteptr = (uint8_t *)vaddr;
+    for (uint8_t i = 0; i < 4; i++)
+    {
+        if (get_user(check_byteptr + i) == -1)
+        {
+            exit_special();
+        }
+    }
+
+    return ptr;
+}
+```
+
+`exit_special()`作用是若三种情况中有任一不符合，则将`exit_code`设为-1，并终止用户进程，代码如下：
+
+```c
+void exit_special(void){
+  thread_current()->st_exit = -1;
+  thread_exit();
+}
+```
+
+### 说明
+
+实现以下十三个系统调用（共二十个），列出的原型存储在`lib/user/syscall.h`
+
+```c
+/* Projects 2 and later. */
+void halt (void) NO_RETURN;
+void exit (int status) NO_RETURN;
+pid_t exec (const char *file);
+int wait (pid_t);
+bool create (const char *file, unsigned initial_size);
+bool remove (const char *file);
+int open (const char *file);
+int filesize (int fd);
+int read (int fd, void *buffer, unsigned length);
+int write (int fd, const void *buffer, unsigned length);
+void seek (int fd, unsigned position);
+unsigned tell (int fd);
+void close (int fd);
+```
+
+每个系统调用的系统调用号在`lib/syscall-nr.h`中定义：
+
+（此处仅摘出Project2有关的系统调用）
+
+```c
+SYS_HALT,                   /* Halt the operating system. */
+SYS_EXIT,                   /* Terminate this process. */
+SYS_EXEC,                   /* Start another process. */
+SYS_WAIT,                   /* Wait for a child process to die. */
+SYS_CREATE,                 /* Create a file. */
+SYS_REMOVE,                 /* Delete a file. */
+SYS_OPEN,                   /* Open a file. */
+SYS_FILESIZE,               /* Obtain a file's size. */
+SYS_READ,                   /* Read from a file. */
+SYS_WRITE,                  /* Write to a file. */
+SYS_SEEK,                   /* Change position in a file. */
+SYS_TELL,                   /* Report current position in a file. */
+SYS_CLOSE,                  /* Close a file. */
+```
+
+### 数据结构
+
+在`thread/thread.h`中修改thread的结构用于完成后续实验
+
+```c
+/* Our implementation for struct thread to store useful information */
+    /* Structure for Task2 */
+    struct list childs;                 /* The list of childs */
+    struct child * thread_child;        /* Store the child of this thread */
+    int st_exit;                        /* Exit status */
+    struct semaphore sema;              /* Control the child process's logic, finish parent waiting for child */
+    bool success;                       /* Judge whehter the child's thread execute successfully */
+    struct thread* parent;              /* Parent thread of the thread */
+    
+    /* Structure for Task3 */
+    struct list files;                  /* List of opened files */
+    int file_fd;                        /* File's descriptor */
+    struct file * file_owned;           /* The file opened */
+
+```
+
+### syscall_init()
+
+#### 作用
+
+初始化系统调用，通过`syscall`函数指针数组来存储要实现的13个系统调用
+
+> The skeleton implementation we provide "handles" system calls by terminating the process. It will need to retrieve the system call number, then any system call arguments, and carry out appropriate actions.
+
+即在`syscall_handler()`中进行检索系统调用号，识别运行哪一个系统调用，从而执行对应操作
+
+#### 实现
+
+定义系统调用函数指针数组和原型
+
+```c
+#define max_syscall 20
+/* Our implementation for storing the array of system calls for Task2 and Task3 */
+static void (*syscalls[max_syscall])(struct intr_frame *);
+
+/* Our implementation for Task2: syscall halt,exec,wait and practice */
+void sys_halt(struct intr_frame *f); /* syscall halt. */
+void sys_exit(struct intr_frame *f); /* syscall exit. */
+void sys_exec(struct intr_frame *f); /* syscall exec. */
+
+/* Our implementation for Task3: syscall create, remove, open, filesize, read, write, seek, tell, and close */
+void sys_create(struct intr_frame *f);   /* syscall create */
+void sys_remove(struct intr_frame *f);   /* syscall remove */
+void sys_open(struct intr_frame *f);     /* syscall open */
+void sys_wait(struct intr_frame *f);     /*syscall wait */
+void sys_filesize(struct intr_frame *f); /* syscall filesize */
+void sys_read(struct intr_frame *f);     /* syscall read */
+void sys_write(struct intr_frame *f);    /* syscall write */
+void sys_seek(struct intr_frame *f);     /* syscall seek */
+void sys_tell(struct intr_frame *f);     /* syscall tell */
+void sys_close(struct intr_frame *f);    /* syscall close */
+static void syscall_handler(struct intr_frame *);
+struct thread_file *find_file_id(int fd);
+```
+
+`syscall_init()`实现：
+
+```c
+void syscall_init(void)
+{
+    intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
+    /* Our implementation for Task2: initialize halt,exit,exec */
+    syscalls[SYS_HALT] = &sys_halt;
+    syscalls[SYS_EXIT] = &sys_exit;
+    syscalls[SYS_EXEC] = &sys_exec;
+    /* Our implementation for Task3: initialize create, remove, open, filesize, read, write, seek, tell, and close */
+    syscalls[SYS_WAIT] = &sys_wait;
+    syscalls[SYS_CREATE] = &sys_create;
+    syscalls[SYS_REMOVE] = &sys_remove;
+    syscalls[SYS_OPEN] = &sys_open;
+    syscalls[SYS_WRITE] = &sys_write;
+    syscalls[SYS_SEEK] = &sys_seek;
+    syscalls[SYS_TELL] = &sys_tell;
+    syscalls[SYS_CLOSE] = &sys_close;
+    syscalls[SYS_READ] = &sys_read;
+    syscalls[SYS_FILESIZE] = &sys_filesize;
+}
+```
+
+### syscall_handler()
+
+#### 作用
+
+用户的命令会被终端识别，并把命令的参数压入栈。所以系统调用号是存放在栈顶的，在这个函数中，需要弹出用户栈的参数，取出系统调用号，再按照这个系统调用号去查找在`syscall_init()`中定义的`syscall`数组，找到对应的系统调用并实现
+
+#### 实现
+
+```c
+/* Smplify the code to maintain the code more efficiently */
+static void
+syscall_handler(struct intr_frame *f UNUSED)
+{
+    //Baoer:intr_frame: interrupt stack frame
+    /* For Task2 practice, just add 1 to its first argument, and print its result */
+    int *p = f->esp;  //Baoer:save stack pointer
+    check_ptr2(p + 1);  //Baoer: check if is valid
+    int type = *(int *)f->esp;  //Baoer:record the system call num at the top of the stack
+    if (type <= 0 || type >= max_syscall)
+    {
+        exit_special();   //Baoer:wrong num,exit
+    }
+    syscalls[type](f);  //Baoer: right num,check and run
+}
+```
+
+### syscall_halt()
+
+> 说明：通过调用终止Pintos shutdown_power_off() (在`devices/shutdown.h`中声明)
+>
+> 这应该很少使用，因为您会丢失一些有关可能的死锁情况等的信息
+
+实现：
+
+直接调用`shutdown_power_off()`即可
+
+```c
+#include <devices/shutdown.h>
+void sys_halt(struct intr_frame *f)
+{
+    shutdown_power_off();
+}
+```
+
+### syscall_exit()
+
+> 说明：终止当前用户程序，将`status`返回给内核，如果其父进程在等待它，这就是要返回的状态。通常`status0`表示成功，非零值表示错误
+
+实现：
+
+```c
+/* Do sytem exit */
+void sys_exit(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);
+    *user_ptr++;
+    /* record the exit status of the process */
+    thread_current()->st_exit = *user_ptr;
+    thread_exit();
+}
+```
+
+### syscall_exec()
+
+> 说明：运行名称在`cmd_line`中给出的可执行文件，传递任何给定的参数，并返回新进程的pid。如果程序因任何原因无法加载或运行，则必须返回pid -1。因此父进程不能从exec中返回直到它知道子进程是否成功加载了它的可执行文件。必须使用适当的同步来确保这一点
+
+调用`process.c`中的`process_execute()`运行进程
+
+```c
+/* Do sytem exec */
+void sys_exec(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);
+    check_ptr2(*(user_ptr + 1));  //Baoer:check if the file is valid, not valid return -1
+    *user_ptr++;
+    f->eax = process_execute((char *)*user_ptr);  //valid, do process_execute()
+}
+```
+
+### syscall_wait()
+
+> 说明：等待子进程 pid 并检索子进程的退出状态。 如果 pid 仍然存在，则等待线程TID终止，然后返回 pid 传递给 exit 的状态。如果 pid 没有调用 exit()，而是被内核终止（例如，由于异常而终止），wait(pid) 必须返回 -1。父进程等待在父进程调用 wait 时已经终止的子进程是完全合法的，但内核仍然必须允许父进程检索其子进程的退出状态，或者获知子进程已被内核终止。立即返回-1的三种情况：1.内核终止时;2.子线程的tid不存在或其不是调用进程的子线程;3.process_wait()被成功调用了，即子进程成功运行结束
+
+调用`process.c`中的`process_wait()`运行进程
+
+实现：
+```c
+/* Do sytem wait */
+void sys_wait(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);//Zlin:check if the parameter address is legal
+    *user_ptr++;
+    f->eax = process_wait(*user_ptr);//Zlin:If valid, call process_wait to complete the system call and wait for the end of a child process
+}
+```
+
+### syscall_creat()
+> 说明：创建文件，一个获取+释放操作锁的组合。注意：创建新文件并不会打开它：打开新文件是一个单独的操作，需要一个 open 系统调用。
+
+调用`filesys.c`中的`filesys_create`来创建文件
+
+实现：
+```c
+/* Do sytem create, we need to acquire lock for file operation in the following methods when do file operation */
+void sys_create(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 5);//Zlin:check if the parameter address is legal
+    check_ptr2(*(user_ptr + 4));//Zlin:Check page validity
+    *user_ptr++;
+    acquire_lock_f();//Zlin:Obtain the file lock before creating the file
+    f->eax = filesys_create((const char *)*user_ptr, *(user_ptr + 1));//Zlin:Call filesys_create to create a file, and the parameter name is stored on the top of the stack
+    release_lock_f();//Zlin:Create and release the lock
+}
+```
+
+### syscall_remove()
+> 说明：系统调用 bool remove (const char *file) 删除名为 file 的文件。 成功则返回真，失败返回假。注意：无论文件是打开还是关闭，都可以删除文件，删除打开的文件并不会关闭它。
+
+调用`filesys.c`中的`filesys_remove`来删除文件
+
+实现：
+```c
+/* Do system remove, by calling the method filesys_remove */
+void sys_remove(struct intr_frame *f)
+{
+uint32_t *user_ptr = f->esp;
+check_ptr2(user_ptr + 1);
+check_ptr2(*(user_ptr + 1));
+*user_ptr++;
+acquire_lock_f();//Zlin:Obtain the file lock before deleting the file
+f->eax = filesys_remove((const char *)*user_ptr);//Zlin:Call filesys_remove to delete the file, and the parameter name is stored on the top of the stack
+release_lock_f();//Zlin:Release the lock
+}
+```
+
+### syscall_open()
+> 说明：系统调用：int open (const char *file) 打开名为 file 的文件。 返回一个称为“文件描述符”(fd) 的非负整数句柄，如果无法打开文件，则返回 -1。
+注意：当单个文件被多次打开时，无论是单个进程还是不同进程，每次打开都会返回一个新的文件描述符。 单个文件的不同文件描述符在单独的 close 调用中独立关闭，并且它们不共享文件位置。
+
+调用`filesys.c`中的`filesys_open`来打开文件
+
+实现：
+```c
+/* Do system open, open file by the function filesys_open */
+void sys_open(struct intr_frame *f)
+{
+uint32_t *user_ptr = f->esp;
+check_ptr2(user_ptr + 1);
+check_ptr2(*(user_ptr + 1));
+*user_ptr++;
+acquire_lock_f();//Zlin:Obtain the file lock before opening the file
+struct file *file_opened = filesys_open((const char *)*user_ptr);//Zlin:Call filesys_open to open the file pointed to by the top of the stack
+release_lock_f();//Zlin:Release the lock
+struct thread *t = thread_current();
+if (file_opened)
+{
+struct thread_file *thread_file_temp = malloc(sizeof(struct thread_file));
+thread_file_temp->fd = t->file_fd++;//Zlin:Add a file identifier belonging to the current thread to the file in order
+thread_file_temp->file = file_opened;
+list_push_back(&t->files, &thread_file_temp->file_elem);//Zlin:Add this file to the list of open files in the current thread t->files
+f->eax = thread_file_temp->fd;//Zlin:Open successfully, return the file identifier ----non-negative, and store the file identifier fd in eax
+}
+else
+{
+f->eax = -1;//Zlin:Return -1 if open fails
+}
+}
+```
+
+### syscall_write()
+在参数传递的测试中因为没有完成系统调用write，所以无法把数据打印到控制台，也就没有办法进行测试，现在这个问题可以得到解决了。
+> 说明：系统调用：int write (int fd, const void *buffer, unsigned size)
+将 size 字节从缓冲区写入打开的文件 fd。 返回实际写入的字节数，如果某些字节无法写入，则可能小于 size。
+注意：预期的行为是将尽可能多的字节写入文件末尾并返回实际写入的数量，如果根本无法写入字节，则返回 0。
+
+调用putbuf函数完成缓冲区写入；调用find_file_id获取要写入的文件的文件标识符；调用file_write往对应文件中写入数据
+
+实现：
+```c
+/* Do system write, Do writing in stdout and write in files */
+void sys_write(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 7);
+    check_ptr2(*(user_ptr + 6));
+    *user_ptr++;
+    int temp2 = *user_ptr;//Zlin:There are two situations for write: write data to the buffer or write data to the file. Take the top element of the stack and record it as temp2, this parameter marks the write type
+    const char *buffer = (const char *)*(user_ptr + 1);
+    off_t size = *(user_ptr + 2);
+    if (temp2 == 1)
+    {
+        /* Use putbuf to do testing */
+        putbuf(buffer, size);
+        f->eax = size;
+    }
+    else
+    {
+        /* Write to Files */
+        struct thread_file *thread_file_temp = find_file_id(*user_ptr);//Zlin:Get file identifier and find the file
+        if (thread_file_temp)
+        {
+            acquire_lock_f();
+            f->eax = file_write(thread_file_temp->file, buffer, size);
+            release_lock_f();
+        }
+        else
+        {
+            f->eax = 0;
+        }
+    }
+}
+```
+
+### syscall_seek()
+> 说明：系统调用void seek (int fd, unsigned position) 将打开文件 fd 中要读取或写入的下一个字节更改为位置，以文件开头的字节数表示。 （因此，位置 0 是文件的开始。）
+
+调用find_file_id函数找到要进行seek操作的文件，然后根据传入的参数（文件标识符、位置），调用file_seek函数把下一个要读入或写入的字节跳转到指定文件的指定位置。
+
+
+实现：
+```c
+/* Do system seek, by calling the function file_seek() in filesystem */
+void sys_seek(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 5);
+    *user_ptr++;
+    struct thread_file *file_temp = find_file_id(*user_ptr);
+    if (file_temp)
+    {
+        acquire_lock_f();
+        file_seek(file_temp->file, *(user_ptr + 1));//Zlin:Jump the next byte to be read or written to the specified position
+        release_lock_f();
+    }
+}
+
+```
+
+### syscall_tell()
+> 说明：系统调用：unsigned tell (int fd) 返回要在打开的文件 fd 中读取或写入的下一个字节的位置，以从文件开头的字节数表示。
+
+调用find_file_id获取文件标识符；调用file.c文件中的file_tell返回下一个在已打开文件fd中即将被读入或写入的字节的位置
+
+实现：
+```c
+/* Do system tell, by calling the function file_tell() in filesystem */
+void sys_tell(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);
+    *user_ptr++;
+    struct thread_file *thread_file_temp = find_file_id(*user_ptr);//Zlin:Get the file identifier through find_file_id
+    if (thread_file_temp)
+    {
+        acquire_lock_f();
+        f->eax = file_tell(thread_file_temp->file);//Zlin:Call file_tell to return the position of the next byte to be read or written in the opened file fd
+        release_lock_f();
+    }
+    else
+    {
+        f->eax = -1;///Zlin:Return -1 if fails
+    }
+}
+```
+
+### syscall_close()
+> 说明：系统调用void close (int fd) 关闭文件描述符,退出或终止进程会隐式关闭其所有打开的文件描述符。
+
+调用find_file_id获取文件标识符；调用file.c文件中的file_close关闭文件
+
+实现：
+```c
+/* Do system close, by calling the function file_close() in filesystem */
+void sys_close(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);
+    *user_ptr++;
+    struct thread_file *opened_file = find_file_id(*user_ptr);
+    if (opened_file)
+    {
+        acquire_lock_f();
+        file_close(opened_file->file);//Zlin:Call file_close to close the file
+        release_lock_f();
+        /* Remove the opened file from the list */
+        list_remove(&opened_file->file_elem);
+        /* Free opened files */
+        free(opened_file);
+    }
+}
+```
+
+
+### syscall_filesize()
+> 说明：返回打开的文件的大小（以字节为单位）
+
+调用find_file_id获取文件标识符；调用file.c文件中的file_length返回以文件标识符fd指代的文件的大小
+
+实现：
+```c
+/* Do system filesize, by calling the function file_length() in filesystem */
+void sys_filesize(struct intr_frame *f)
+{
+    uint32_t *user_ptr = f->esp;
+    check_ptr2(user_ptr + 1);
+    *user_ptr++;
+    struct thread_file *thread_file_temp = find_file_id(*user_ptr);//Zlin:Find the specified file by file identifier
+    if (thread_file_temp)
+    {
+        acquire_lock_f();
+        f->eax = file_length(thread_file_temp->file);//Zlin:Call file_length to return the size of the file referred to by the file identifier fd
+        release_lock_f();
+    }
+    else
+    {
+        f->eax = -1;
+    }
+}
+```
+
+## 参考资料
+
+https://zhuanlan.zhihu.com/p/343328700
+
+https://blog.csdn.net/weixin_44765402/article/details/111089137
+
+https://www.dengzexuan.top/2021/05/pintos-project2
